@@ -1,0 +1,8 @@
+sample,study,organism,platform,layout,replicate,fastq_1,fastq_2
+SRR33173255,Jiang_2026,mus_musculus,ILLUMINA,paired,1,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173255_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173255_2.fastq.gz
+SRR33173256,Jiang_2026,mus_musculus,ILLUMINA,paired,2,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173256_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173256_2.fastq.gz
+SRR33173257,Jiang_2026,mus_musculus,ILLUMINA,paired,3,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173257_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173257_2.fastq.gz
+SRR33173258,Jiang_2026,mus_musculus,ILLUMINA,paired,4,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173258_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173258_2.fastq.gz
+SRR33173259,Jiang_2026,mus_musculus,ILLUMINA,paired,1,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173259_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173259_2.fastq.gz
+SRR33173260,Jiang_2026,mus_musculus,ILLUMINA,paired,2,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173260_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173260_2.fastq.gz
+SRR33173261,Jiang_2026,mus_musculus,ILLUMINA,paired,3,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173261_1.fastq.gz,/scratch/srajes23/RNA-seq-pipeline-for-Diabetic-Retinopathy-paper/fastq/SRR33173261_2.fastq.gz
