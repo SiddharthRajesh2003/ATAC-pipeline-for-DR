@@ -17,8 +17,8 @@
 
 set -euo pipefail
 
-base=/scratch/srajes23/ATAC-seq-pipeline-for-Diabetic-Retinopathy-paper
-perm=/data/srangas1/scRNA-pipeline-for-DR
+base=/scratch/srajes23/atac_pipeline
+perm=/data/srangas1/ATAC-pipeline-for-DR
 sra_sif=$perm/containers/sra-tools_latest.sif
 config=$perm/ncbi_config
 sra=$base/sra_data
