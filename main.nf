@@ -29,7 +29,7 @@ workflow {
     reads_ch = samplesheet_ch
         .map { sample_id, study, _organism, single_end, reads -> tuple(sample_id, study, single_end, reads) }
 
-    // Same files as the RNA-seq pipeline: ${params.reference} points at its reference directory
+    // Same files as the RNA-seq pipeline, copied into ${params.reference}
     def reference_files = [
         'mus_musculus'      : "mouse_GRCm39",
         'homo_sapiens'      : 'human_hg38',
