@@ -1,0 +1,291 @@
+---
+title: "ATAC-seq preprocessing"
+subtitle: "Jiang 2026 and Yu 2023 pipeline counts (GRCm39), plus published Yu 2023 and Yuan 2026 peak sets"
+format:
+  html:
+    toc: true
+    code-fold: show
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+Input: `main.nf` outputs in `results/`, GEO files in `atac_data/`, and SRA run tables in `metadata/`.
+Output: `results/processed/`. Render with `quarto render analysis/preprocess_atac.qmd` from `atac_pipeline/`.
+
+Studies stay separate. Each has its own consensus peak set, and Jiang (aorta) and Yu (retina) differ in tissue, so
+no matrices are merged and no batch correction is run. Saved counts are raw and unfiltered, because `run_deseq()`
+applies its own low-count filter.
+
+Jiang's H3K27ac bigwigs (mm10) need no preprocessing and are summarised over windows in `DR Paper/analysis/pilot.qmd`.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = "..")   # paths below are relative to atac_pipeline/
+```
+
+```{r libs}
+library(edgeR)
+library(GenomicRanges)
+library(tidyverse)   # loaded last so its verbs aren't masked
+
+processed_dir <- "results/processed"
+dir.create(processed_dir, showWarnings = FALSE, recursive = TRUE)
+
+cond_levels <- c("normal", "diabetic")   # same levels as DR Paper/analysis/helpers.R
+studies     <- c("Jiang_2026", "Yu_2023")
+canonical   <- c(1:19, "X", "Y")         # GRCm39 Ensembl names; MT is already removed by FilterBam
+
+# Plan gates, pilot_multiomic_plan.md section P3
+min_frip  <- 0.2
+min_reads <- 20e6
+min_tss   <- 5
+
+read_meta <- function(study) read.csv(file.path("metadata", paste0(study, "_metadata.csv")), check.names = FALSE)
+```
+
+## 1. Sample metadata
+
+Only the runs in `samplesheet/samplesheet.csv` went through the pipeline. For Jiang that is the C57BL/6J STZ arm; its
+db/db, high-fat-diet and HUVEC runs were not processed.
+
+```{r metadata}
+sheet <- read.csv("samplesheet/samplesheet.csv")
+
+# Aortic EC, so a labelled proxy for retinal EC. Never a retinal result.
+jiang_meta <- read_meta("Jiang_2026") |>
+  filter(Run %in% sheet$sample[sheet$study == "Jiang_2026"]) |>
+  transmute(
+    sample    = Run,
+    study     = "Jiang_2026",
+    organism  = "mouse",
+    tissue    = "aorta",
+    cell_type = "EC",
+    genotype,
+    model     = "STZ",
+    condition = factor(if_else(treatment == "Streptozotocin injection", "diabetic", "normal"), levels = cond_levels),
+    role      = "proxy"
+  )
+stopifnot(nrow(jiang_meta) == 7, all(jiang_meta$genotype == "C57BL/6J"),
+          table(jiang_meta$condition) == c(4, 3))
+
+# P16 retinal EC with no diabetes arm. Controls are the baseline reference; the Zeb1 arm is a perturbation.
+yu_meta <- read_meta("Yu_2023") |>
+  transmute(
+    sample    = Run,
+    study     = "Yu_2023",
+    organism  = "mouse",
+    tissue    = "retina",
+    cell_type = "EC",
+    genotype,
+    model     = "none",
+    condition = factor("normal", levels = cond_levels),
+    role      = if_else(genotype == "control", "reference", "excluded_perturbation"),
+    gsm       = `GEO_Accession (exp)`
+  )
+stopifnot(nrow(yu_meta) == 4, setequal(yu_meta$sample, sheet$sample[sheet$study == "Yu_2023"]),
+          table(yu_meta$role) == c(2, 2))
+
+sample_meta <- bind_rows(jiang_meta, select(yu_meta, -gsm))
+count(sample_meta, study, condition, genotype, role)
+```
+
+## 2. Counts and peak annotation
+
+featureCounts writes samples in arbitrary order, so columns are matched to the metadata by name.
+
+```{r load}
+read_counts <- function(study) {
+  x <- read.delim(file.path("results/counts", study, paste0(study, "_peak_counts.txt")),
+                  comment.char = "#", check.names = FALSE)
+  cts <- as.matrix(x[, str_subset(names(x), "\\.bam$")])
+  colnames(cts) <- str_remove(colnames(cts), "_filtered\\.bam$")
+  rownames(cts) <- x$Geneid
+  ids <- sample_meta$sample[sample_meta$study == study]
+  stopifnot(setequal(colnames(cts), ids), !anyDuplicated(rownames(cts)), !anyNA(cts))
+  cts[, ids]
+}
+
+# bedtools closest writes "." / -1 when a contig holds no TSS.
+# ponytail: promoter is absolute distance <= 2 kb to the nearest annotated TSS; the active-TSS -2000/+500 window is P4.
+read_peaks <- function(study) {
+  read_tsv(file.path("results/consensus_peaks", study, paste0(study, "_consensus_annotated.bed")),
+           col_names = c("chr", "start", "end", "tss_chr", "tss_start", "tss_end",
+                         "gene_id", "gene_name", "strand", "distance_to_tss"),
+           col_types = "ciiciicccd", na = ".") |>
+    mutate(peak_id = paste0(chr, ":", start, "-", end),
+           distance_to_tss = na_if(distance_to_tss, -1),
+           peak_class = if_else(!is.na(distance_to_tss) & distance_to_tss <= 2000, "promoter", "distal")) |>
+    select(peak_id, chr, start, end, gene_id, gene_name, strand, distance_to_tss, peak_class)
+}
+
+# Peaks on unplaced contigs are dropped. Coordinates are BED (0-based start), as in peak_id.
+counts <- map(set_names(studies), read_counts)
+peaks  <- map(set_names(studies), \(s) {
+  p <- read_peaks(s)
+  stopifnot(setequal(p$peak_id, rownames(counts[[s]])), !anyDuplicated(p$peak_id))
+  filter(p, chr %in% canonical)
+})
+counts <- imap(counts, \(cts, s) cts[peaks[[s]]$peak_id, ])
+
+imap_dfr(peaks, \(p, s) tibble(study = s, peaks = nrow(p), promoter = sum(p$peak_class == "promoter"),
+                               median_width = median(p$end - p$start)))
+```
+
+## 3. QC against the plan gates
+
+FRiP and the read count come from the featureCounts summary, so they describe the filtered BAM: nuclear, MAPQ >= 30,
+properly paired, deduplicated. Pairs are doubled to reads. FRiP uses the same denominator as `update_master_sheet.py`.
+It is calculated on the study's own consensus peaks, before contigs are dropped.
+
+`tss_enrichment` is `NA` because the pipeline doesn't compute it. A sample therefore reads `fail` or `pending_tss`,
+never `pass`.
+
+```{r qc}
+mqc <- function(study, file) {
+  read.delim(file.path("results/multiqc", study, paste0(study, "_multiqc_report_data"), file), check.names = FALSE) |>
+    mutate(sample = str_remove(Sample, "_.*$"))
+}
+
+study_qc <- function(study) {
+  summ <- read.delim(file.path("results/counts", study, paste0(study, "_peak_counts.txt.summary")), check.names = FALSE) |>
+    pivot_longer(-Status, names_to = "sample", values_to = "n") |>
+    mutate(sample = str_remove(sample, "_filtered\\.bam$")) |>
+    summarise(frip = sum(n[Status == "Assigned"]) / sum(n), filtered_reads = 2 * sum(n), .by = sample)
+
+  summ |>
+    left_join(transmute(mqc(study, "multiqc_macs.txt"), sample, macs_peaks = peak_count), by = "sample") |>
+    left_join(transmute(mqc(study, "multiqc_bowtie2.txt"), sample, align_rate = overall_alignment_rate), by = "sample") |>
+    left_join(transmute(mqc(study, "multiqc_picard_dups.txt"), sample, pct_dup = 100 * PERCENT_DUPLICATION), by = "sample") |>
+    left_join(transmute(mqc(study, "multiqc_samtools_stats.txt"), sample, mean_insert = insert_size_average), by = "sample")
+}
+
+sample_qc <- map_dfr(studies, study_qc) |>
+  mutate(tss_enrichment = NA_real_,
+         frip_ok  = frip >= min_frip,
+         reads_ok = filtered_reads >= min_reads,
+         gate     = if_else(frip_ok & reads_ok, "pending_tss", "fail"))
+
+sample_meta <- left_join(sample_meta, sample_qc, by = "sample")
+stopifnot(!anyNA(select(sample_meta, frip, macs_peaks, align_rate, pct_dup, mean_insert)))
+
+sample_meta |>
+  select(study, sample, condition, genotype, frip, filtered_reads, macs_peaks, align_rate, pct_dup, mean_insert, gate) |>
+  mutate(across(c(frip), \(x) round(x, 3)), filtered_reads = round(filtered_reads / 1e6, 1)) |>
+  knitr::kable()
+```
+
+## 4. PCA
+
+Log-CPM on the top 2,000 most variable peaks, after the same low-count rule as `run_deseq()`. Labels show MACS3 peak
+counts, to separate biology from library quality.
+
+```{r pca, fig.width = 9, fig.height = 4}
+study_pca <- function(study) {
+  m   <- filter(sample_meta, study == !!study) |> mutate(group = interaction(condition, genotype, drop = TRUE))
+  cts <- counts[[study]][, m$sample]
+  keep <- rowSums(cts >= 10) >= min(table(m$group))
+  lcpm <- cpm(cts[keep, ], log = TRUE)
+  top  <- head(order(apply(lcpm, 1, var), decreasing = TRUE), 2000)
+  pc   <- prcomp(t(lcpm[top, ]))
+  pv   <- round(100 * pc$sdev^2 / sum(pc$sdev^2))
+  bind_cols(m, as_tibble(pc$x[, 1:2])) |>
+    mutate(panel = sprintf("%s (%d/%d peaks kept; PC1 %d%%, PC2 %d%%)", study, sum(keep), nrow(cts), pv[1], pv[2]))
+}
+
+map_dfr(studies, study_pca) |>
+  ggplot(aes(PC1, PC2, colour = group, label = macs_peaks)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.8, size = 3, show.legend = FALSE) +
+  facet_wrap(~ panel, scales = "free") +
+  theme_bw()
+```
+
+## 5. Published peak sets
+
+Reference sets only, called by the original authors and never counted.
+
+**Yuan 2026:** healthy human multiome, 1 bp summits per cell type. Build taken as hg38 and still marked `VERIFY` in
+the plan. Sets under 5,000 summits are flagged `low_peak_count`. `Perictyes` is a typo in the GEO filename, corrected
+in the label only.
+
+**Yu 2023 GEO:** these are **not on GRCm39**, so don't overlap them with pipeline peaks without a liftOver. The `chr`
+prefix alone doesn't explain it (see the check below). Use the Yu consensus from section 2 for GRCm39 work.
+
+```{r reference-peaks}
+yuan_files <- list.files("atac_data/Yuan_2026", "summits_filter\\.bed\\.gz$", full.names = TRUE)
+yuan <- map_dfr(yuan_files, \(f) {
+  read_tsv(f, col_names = c("chr", "start", "end", "name", "score"), col_types = "ciicd") |>
+    mutate(cell_type = str_match(basename(f), "GSE277326_(.+)_0\\.\\d+_summits")[, 2],
+           summit_cutoff = as.numeric(str_match(basename(f), "_(0\\.\\d+)_summits")[, 2]))
+}) |>
+  mutate(cell_type = str_replace(cell_type, "Perictyes", "Pericytes"),
+         low_peak_count = n() < 5000, .by = cell_type)
+stopifnot(n_distinct(yuan$cell_type) == length(yuan_files), all(yuan$end - yuan$start == 1))
+
+yu_files <- list.files("atac_data/Yu_2023", "broadPeak\\.gz$", full.names = TRUE)
+yu_geo <- map_dfr(yu_files, \(f) {
+  read_tsv(f, col_names = c("chr", "start", "end", "name", "score", "strand", "signal", "p", "q"),
+           col_types = "ciicicddd", na = ".") |>
+    mutate(gsm = str_extract(basename(f), "^GSM\\d+"))
+}) |>
+  left_join(select(yu_meta, gsm, sample, genotype, role), by = "gsm")
+stopifnot(!anyNA(yu_geo$sample), n_distinct(yu_geo$sample) == 4)
+
+as_gr <- function(x, genome) {
+  gr <- makeGRangesFromDataFrame(x, keep.extra.columns = TRUE, starts.in.df.are.0based = TRUE)
+  gr$genome <- genome
+  gr
+}
+reference_peaks <- list(
+  yuan   = as_gr(yuan, "hg38 (VERIFY)"),
+  yu_geo = as_gr(select(yu_geo, -strand), "older than GRCm39 (likely mm10)")
+)
+
+count(yuan, cell_type, low_peak_count, name = "summits")
+```
+
+### Build check for the GEO Yu peaks
+
+If the GEO peaks were on GRCm39, most would overlap the consensus at their stated coordinates. A build difference
+shows up as low overlap that recovers once the coordinates are offset.
+
+```{r yu-build-check}
+yu_cons <- GRanges(paste0("chr", peaks$Yu_2023$chr), IRanges(peaks$Yu_2023$start + 1, peaks$Yu_2023$end))
+yu_all <- reference_peaks$yu_geo
+
+direct <- mean(overlapsAny(yu_all, yu_cons))
+
+# Offsets between builds change along a chromosome, so sweep one narrow stretch of chr1.
+stretch <- yu_all[seqnames(yu_all) == "chr1" & start(yu_all) < 30e6]
+sweep <- tibble(offset = seq(-300e3, 300e3, by = 1e3)) |>
+  mutate(overlap = map_dbl(offset, \(o) mean(overlapsAny(shift(stretch, o), yu_cons))))
+best <- slice_max(sweep, overlap, n = 1, with_ties = FALSE)
+
+tibble(direct_overlap_all = direct,
+       chr1_stretch_at_0 = sweep$overlap[sweep$offset == 0],
+       chr1_stretch_best = best$overlap,
+       best_offset = best$offset)
+```
+
+## 6. Save
+
+```{r save}
+iwalk(counts, \(cts, s) saveRDS(cts, file.path(processed_dir, paste0(s, "_peak_counts.rds"))))
+iwalk(peaks,  \(p, s) write_csv(p, file.path(processed_dir, paste0(s, "_peaks.csv"))))
+write_csv(sample_meta, file.path(processed_dir, "atac_sample_metadata.csv"))
+saveRDS(reference_peaks, file.path(processed_dir, "atac_reference_peaks.rds"))
+
+# Reload what was written, so a downstream load_cohort()-style check holds
+walk(studies, \(s) {
+  cts <- readRDS(file.path(processed_dir, paste0(s, "_peak_counts.rds")))
+  m   <- read.csv(file.path(processed_dir, "atac_sample_metadata.csv")) |> filter(study == s)
+  p   <- read.csv(file.path(processed_dir, paste0(s, "_peaks.csv")), colClasses = c(chr = "character"))
+  stopifnot(identical(colnames(cts), m$sample), identical(rownames(cts), p$peak_id))
+})
+list.files(processed_dir)
+```
+
+```{r session}
+sessionInfo()
+```
